@@ -4,6 +4,8 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import os
+import gspread
+from google.oauth2.service_account import Credentials
 
 # ─── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -20,16 +22,56 @@ DATASETS = {
     "Bangalore Region": ("Format for data Amazon Project Blr.xlsx", "Bangalore"),
 }
 
-# ─── Improved CSS — light-on-dark with high contrast ──────────────────────────
+# Google Sheets URLs — mapped to the same region names
+# These are read from .streamlit/secrets.toml
+GSHEET_URLS = {}
+
+try:
+    gs_cfg = st.secrets["google_sheets"]
+    if gs_cfg.get("hyderabad_url", "").startswith("https://"):
+        GSHEET_URLS["Hyderabad Region"] = gs_cfg["hyderabad_url"]
+    if gs_cfg.get("bangalore_url", "").startswith("https://"):
+        GSHEET_URLS["Bangalore Region"] = gs_cfg["bangalore_url"]
+except Exception:
+    pass  # secrets not configured yet — Google Sheets option won't appear
+
+GSHEETS_AVAILABLE = len(GSHEET_URLS) > 0
+
+# ─── CSS — Clean Light Theme ──────────────────────────────────────────────────
 st.markdown("""
 <style>
     /* ── Global ── */
     .stApp {
-        background: #0e1117;
+        background: #f8f9fb;
     }
     section[data-testid="stSidebar"] {
-        background: #161b22;
-        border-right: 1px solid #30363d;
+        background: #1e293b;
+        border-right: 1px solid #334155;
+    }
+    section[data-testid="stSidebar"] * {
+        color: #e2e8f0 !important;
+    }
+    section[data-testid="stSidebar"] h2,
+    section[data-testid="stSidebar"] h5 {
+        color: #f8fafc !important;
+    }
+    section[data-testid="stSidebar"] .stRadio label,
+    section[data-testid="stSidebar"] .stSelectbox label,
+    section[data-testid="stSidebar"] .stFileUploader label {
+        color: #e2e8f0 !important;
+    }
+    section[data-testid="stSidebar"] hr {
+        border-color: #475569 !important;
+    }
+    section[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] {
+        background: #334155;
+        border-color: #475569;
+    }
+    section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label {
+        background: transparent;
+    }
+    section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label[data-checked="true"] {
+        background: #334155;
     }
     header[data-testid="stHeader"] {
         background: transparent;
@@ -37,35 +79,37 @@ st.markdown("""
 
     /* ── KPI Cards ── */
     .kpi-card {
-        background: #161b22;
-        border: 1px solid #30363d;
+        background: #ffffff;
+        border: 1px solid #e1e4e8;
         border-radius: 12px;
         padding: 20px 16px;
         text-align: center;
-        transition: border-color 0.2s, transform 0.15s;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+        transition: border-color 0.2s, transform 0.15s, box-shadow 0.2s;
     }
     .kpi-card:hover {
-        border-color: #58a6ff;
+        border-color: #0969da;
         transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(9,105,218,0.10);
     }
     .kpi-icon { font-size: 1.6rem; margin-bottom: 4px; }
     .kpi-value {
         font-size: 1.85rem;
         font-weight: 700;
-        color: #58a6ff;
+        color: #0969da;
         margin: 6px 0 2px 0;
         line-height: 1.2;
     }
     .kpi-label {
         font-size: 0.75rem;
         font-weight: 600;
-        color: #8b949e;
+        color: #656d76;
         text-transform: uppercase;
         letter-spacing: 1px;
     }
     .kpi-sub {
         font-size: 0.78rem;
-        color: #3fb950;
+        color: #1a7f37;
         margin-top: 4px;
     }
 
@@ -73,16 +117,16 @@ st.markdown("""
     .section-title {
         font-size: 1.15rem;
         font-weight: 600;
-        color: #e6edf3;
-        border-left: 3px solid #58a6ff;
+        color: #1f2328;
+        border-left: 3px solid #0969da;
         padding-left: 12px;
         margin: 36px 0 14px 0;
     }
 
     /* ── Sidebar dataset badge ── */
     .dataset-badge {
-        background: #21262d;
-        border: 1px solid #30363d;
+        background: #334155;
+        border: 1px solid #475569;
         border-radius: 8px;
         padding: 10px 12px;
         text-align: center;
@@ -91,11 +135,11 @@ st.markdown("""
     .dataset-badge .region {
         font-size: 1.05rem;
         font-weight: 600;
-        color: #58a6ff;
+        color: #60a5fa !important;
     }
     .dataset-badge .file {
         font-size: 0.7rem;
-        color: #8b949e;
+        color: #94a3b8 !important;
         word-break: break-all;
     }
 </style>
@@ -103,75 +147,132 @@ st.markdown("""
 
 # ─── Color Palette for Charts ─────────────────────────────────────────────────
 CHART_COLORS = {
-    "primary": "#58a6ff",
-    "secondary": "#3fb950",
-    "accent": "#d29922",
-    "highlight": "#f78166",
-    "purple": "#bc8cff",
-    "cyan": "#39d2c0",
-    "text": "#e6edf3",
-    "muted": "#8b949e",
-    "bg_card": "#161b22",
-    "bg_plot": "#0d1117",
-    "grid": "#21262d",
+    "primary": "#0969da",
+    "secondary": "#1a7f37",
+    "accent": "#bf8700",
+    "highlight": "#cf222e",
+    "purple": "#8250df",
+    "cyan": "#0598bc",
+    "text": "#1f2328",
+    "muted": "#656d76",
+    "bg_card": "#ffffff",
+    "bg_plot": "#ffffff",
+    "grid": "#e1e4e8",
 }
 PALETTE = [
-    "#58a6ff", "#3fb950", "#d29922", "#f78166", "#bc8cff",
-    "#39d2c0", "#f0883e", "#a5d6ff", "#7ee787", "#ffd33d",
+    "#0969da", "#1a7f37", "#bf8700", "#cf222e", "#8250df",
+    "#0598bc", "#d4a72c", "#54aeff", "#4ac26b", "#e16f24",
 ]
 CHART_TEMPLATE = dict(
-    template="plotly_dark",
+    template="plotly_white",
     paper_bgcolor="rgba(0,0,0,0)",
     plot_bgcolor=CHART_COLORS["bg_plot"],
     font=dict(color=CHART_COLORS["text"], size=12),
+    xaxis=dict(
+        title_font=dict(color=CHART_COLORS["text"], size=13),
+        tickfont=dict(color=CHART_COLORS["text"], size=11),
+        gridcolor=CHART_COLORS["grid"],
+    ),
+    yaxis=dict(
+        title_font=dict(color=CHART_COLORS["text"], size=13),
+        tickfont=dict(color=CHART_COLORS["text"], size=11),
+        gridcolor=CHART_COLORS["grid"],
+    ),
     margin=dict(l=20, r=20, t=50, b=20),
 )
+
+
+# ─── Expected Columns (for upload validation) ─────────────────────────────────
+EXPECTED_COLUMNS = [
+    "Sr_No", "Sap_No", "Farmer_Name", "Village_Name", "Mandal", "Mobile_No", "State",
+    "Total_Area", "Crop_Name", "Sowing_Date", "Expected_Harvest_Date", "Crop_Stage",
+    "Area_Acre", "Irrigation_Method", "No_Irrigation_Earlier", "Water_Flood_m3",
+    "Water_Source", "Avg_Water_Flood_m3", "Pump_Rate", "Irrigation_Duration_Flood",
+    "Meter_Reading_Date", "Drip_Supply_Date", "Drip_Install_Date", "No_Irrigations_Drip",
+    "Total_Water_Drip_m3", "Irrigation_Duration_Drip", "Avg_Water_Drip_m3",
+    "Meter_30Jan", "Water_Liters_30Jan", "Water_PerAcre_30Jan",
+    "Meter_10Feb", "Water_Liters_10Feb", "Water_PerAcre_10Feb",
+    "Meter_18Feb", "Water_Liters_18Feb", "Water_PerAcre_18Feb",
+    "Meter_End", "Total_Water_Consumption",
+    "Water_Saved_m3", "Yield_Before_Flood", "Yield_After_Drip",
+    "Fertilizer_Saving_Pct", "Electricity_Saving_Pct", "Labour_Saving", "Input_Cost_Reduction",
+]
+
+NUMERIC_COLS = [
+    "Total_Area", "Area_Acre", "No_Irrigations_Drip", "Total_Water_Drip_m3",
+    "Irrigation_Duration_Drip", "Avg_Water_Drip_m3",
+    "Meter_30Jan", "Water_Liters_30Jan", "Water_PerAcre_30Jan",
+    "Meter_10Feb", "Water_Liters_10Feb", "Water_PerAcre_10Feb",
+    "Meter_18Feb", "Water_Liters_18Feb", "Water_PerAcre_18Feb",
+    "Total_Water_Consumption", "Water_Saved_m3",
+]
+
+FARMER_FIELDS = [
+    "Sr_No", "Sap_No", "Farmer_Name", "Village_Name", "Mandal",
+    "Mobile_No", "State", "Total_Area", "Irrigation_Method", "Water_Source",
+]
+
+
+def _clean_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Assign columns, clean rows, convert types, forward-fill."""
+    if len(df.columns) != len(EXPECTED_COLUMNS):
+        raise ValueError(
+            f"Expected {len(EXPECTED_COLUMNS)} columns but got {len(df.columns)}.\n"
+            "Please make sure you are using the standard irrigation Excel template."
+        )
+    df.columns = EXPECTED_COLUMNS
+    df = df[~df["Sr_No"].isin(["Sr No", "Total"])].reset_index(drop=True)
+    for c in NUMERIC_COLS:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df[FARMER_FIELDS] = df[FARMER_FIELDS].ffill()
+    return df
 
 
 # ─── Data Loading ─────────────────────────────────────────────────────────────
 @st.cache_data
 def load_data(file_path: str) -> pd.DataFrame:
     df = pd.read_excel(file_path, sheet_name="Sheet1", header=None, skiprows=1)
+    return _clean_df(df)
 
-    cols = [
-        "Sr_No", "Sap_No", "Farmer_Name", "Village_Name", "Mandal", "Mobile_No", "State",
-        "Total_Area", "Crop_Name", "Sowing_Date", "Expected_Harvest_Date", "Crop_Stage",
-        "Area_Acre", "Irrigation_Method", "No_Irrigation_Earlier", "Water_Flood_m3",
-        "Water_Source", "Avg_Water_Flood_m3", "Pump_Rate", "Irrigation_Duration_Flood",
-        "Meter_Reading_Date", "Drip_Supply_Date", "Drip_Install_Date", "No_Irrigations_Drip",
-        "Total_Water_Drip_m3", "Irrigation_Duration_Drip", "Avg_Water_Drip_m3",
-        "Meter_30Jan", "Water_Liters_30Jan", "Water_PerAcre_30Jan",
-        "Meter_10Feb", "Water_Liters_10Feb", "Water_PerAcre_10Feb",
-        "Meter_18Feb", "Water_Liters_18Feb", "Water_PerAcre_18Feb",
-        "Meter_End", "Total_Water_Consumption",
-        "Water_Saved_m3", "Yield_Before_Flood", "Yield_After_Drip",
-        "Fertilizer_Saving_Pct", "Electricity_Saving_Pct", "Labour_Saving", "Input_Cost_Reduction",
-    ]
-    df.columns = cols
-    df = df[~df["Sr_No"].isin(["Sr No", "Total"])].reset_index(drop=True)
 
-    numeric_cols = [
-        "Total_Area", "Area_Acre", "No_Irrigations_Drip", "Total_Water_Drip_m3",
-        "Irrigation_Duration_Drip", "Avg_Water_Drip_m3",
-        "Meter_30Jan", "Water_Liters_30Jan", "Water_PerAcre_30Jan",
-        "Meter_10Feb", "Water_Liters_10Feb", "Water_PerAcre_10Feb",
-        "Meter_18Feb", "Water_Liters_18Feb", "Water_PerAcre_18Feb",
-        "Total_Water_Consumption", "Water_Saved_m3",
-    ]
-    for c in numeric_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+def load_data_from_upload(file_bytes) -> pd.DataFrame:
+    """Load and validate an uploaded Excel file."""
+    df = pd.read_excel(file_bytes, sheet_name="Sheet1" if "Sheet1" in pd.ExcelFile(file_bytes).sheet_names else 0, header=None, skiprows=1)
+    return _clean_df(df)
 
-    farmer_fields = [
-        "Sr_No", "Sap_No", "Farmer_Name", "Village_Name", "Mandal",
-        "Mobile_No", "State", "Total_Area", "Irrigation_Method", "Water_Source",
+
+@st.cache_data(ttl=10, show_spinner=False)  # cache for 10 seconds, then re-fetch live data
+def load_data_from_gsheet(sheet_url: str) -> pd.DataFrame:
+    """Pull live data from a Google Sheet and return a cleaned DataFrame."""
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets.readonly",
+        "https://www.googleapis.com/auth/drive.readonly",
     ]
-    df[farmer_fields] = df[farmer_fields].ffill()
-    return df
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"], scopes=scopes
+    )
+    client = gspread.authorize(creds)
+    sheet = client.open_by_url(sheet_url).sheet1
+    rows = sheet.get_all_values()
+    # rows[0] = group headers, rows[1] = field headers, data from rows[2:]
+    df = pd.DataFrame(rows[1:])  # skip group header row
+    return _clean_df(df)
 
 
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 💧 Irrigation Dashboard")
+    st.markdown("---")
+
+    # ── Data Source ──
+    source_options = ["📁 Local Excel"]
+    if GSHEETS_AVAILABLE:
+        source_options.insert(0, "☁️ Google Sheets (Live)")
+    st.markdown("##### 🔌 Data Source")
+    data_source = st.radio(
+        "Source", source_options, index=0, label_visibility="collapsed",
+    )
+
     st.markdown("---")
 
     # ── Dataset Selector ──
@@ -182,38 +283,70 @@ with st.sidebar:
         label_visibility="collapsed",
     )
     file_name, region_label = DATASETS[dataset_name]
-    st.markdown(f"""
-    <div class="dataset-badge">
-        <div class="region">📍 {region_label}</div>
-        <div class="file">{file_name}</div>
-    </div>
-    """, unsafe_allow_html=True)
+
+    # Show live badge when using Google Sheets
+    if data_source.startswith("☁️") and dataset_name in GSHEET_URLS:
+        st.markdown(f"""
+        <div class="dataset-badge">
+            <div class="region" style="color:{CHART_COLORS['secondary']};">🟢 Live — Google Sheets</div>
+            <div class="file">Auto-refreshes every 5 min</div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("🔄 Refresh Now", width="stretch"):
+            st.cache_data.clear()
+            st.rerun()
+        # Auto-refresh the page every 5 minutes for live updates
+        st.markdown(
+            '<meta http-equiv="refresh" content="300">',
+            unsafe_allow_html=True,
+        )
 
     st.markdown("---")
 
-    # Load selected dataset
+    # ── File Uploader (only for local mode) ──
+    uploaded_file = None
+    if data_source == "📁 Local Excel":
+        st.markdown("##### 📤 Upload New Excel")
+        uploaded_file = st.file_uploader(
+            "Drop an Excel file here",
+            type=["xlsx", "xls"],
+            label_visibility="collapsed",
+            help="Upload a new irrigation Excel file (must follow the standard template with 45 columns).",
+        )
+        if uploaded_file:
+            st.markdown(f"""
+            <div class="dataset-badge">
+                <div class="region">📄 Uploaded File</div>
+                <div class="file">{uploaded_file.name}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+# ─── Load Data ─────────────────────────────────────────────────────────────────
+upload_error = None
+gsheet_error = None
+
+if data_source.startswith("☁️") and dataset_name in GSHEET_URLS:
+    # ── Google Sheets (live) ──
+    try:
+        df = load_data_from_gsheet(GSHEET_URLS[dataset_name])
+        dataset_name = f"{dataset_name} (Live)"
+    except Exception as e:
+        gsheet_error = str(e)
+        df = load_data(file_name)  # fallback to local Excel
+elif uploaded_file is not None:
+    try:
+        df = load_data_from_upload(uploaded_file)
+        dataset_name = f"Uploaded — {uploaded_file.name}"
+    except ValueError as e:
+        upload_error = str(e)
+        df = load_data(file_name)
+    except Exception as e:
+        upload_error = f"Could not read file: {e}"
+        df = load_data(file_name)
+else:
     df = load_data(file_name)
 
-    # ── Filters ──
-    st.markdown("##### 🎛️ Filters")
-
-    villages = ["All"] + sorted(df["Village_Name"].dropna().unique().tolist())
-    sel_village = st.selectbox("Village", villages)
-
-    crops = ["All"] + sorted(df["Crop_Name"].dropna().unique().tolist())
-    sel_crop = st.selectbox("Crop", crops)
-
-    water_sources = ["All"] + sorted(df["Water_Source"].dropna().unique().tolist())
-    sel_source = st.selectbox("Water Source", water_sources)
-
-# ─── Apply Filters ─────────────────────────────────────────────────────────────
 filtered = df.copy()
-if sel_village != "All":
-    filtered = filtered[filtered["Village_Name"] == sel_village]
-if sel_crop != "All":
-    filtered = filtered[filtered["Crop_Name"] == sel_crop]
-if sel_source != "All":
-    filtered = filtered[filtered["Water_Source"] == sel_source]
 
 # ─── Header ───────────────────────────────────────────────────────────────────
 st.markdown(f"""
@@ -227,9 +360,17 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-st.markdown("")
+# Show upload error if any
+if upload_error:
+    st.error(f"⚠️ **Upload failed:** {upload_error}")
+    st.info("Falling back to the selected dataset. Please upload a file that uses the standard irrigation template (45 columns).")
 
-# ─── KPI Metrics ───────────────────────────────────────────────────────────────
+# Show Google Sheets error if any
+if gsheet_error:
+    st.error(f"⚠️ **Google Sheets failed:** {gsheet_error}")
+    st.info("Falling back to local Excel file. Check that the sheet is shared with the service account and secrets are configured.")
+
+st.markdown("")
 total_water_consumption = filtered["Total_Water_Consumption"].dropna().sum()
 total_water_drip = filtered["Total_Water_Drip_m3"].dropna().sum()
 total_acres = filtered["Area_Acre"].dropna().sum()
@@ -264,6 +405,119 @@ for col, (icon, label, value, sub) in zip(cols_kpi, kpi_items):
         """, unsafe_allow_html=True)
 
 st.markdown("")
+
+# ─── Monthly Water Saved (Bar Graph) ──────────────────────────────────────────
+st.markdown('<div class="section-title">💧 Monthly Water Saved (Estimated)</div>', unsafe_allow_html=True)
+
+# Derive monthly totals from meter readings (drip usage per month)
+jan_drip = filtered["Water_Liters_30Jan"].dropna().sum() / 1000  # convert liters → m³
+feb_drip = (filtered["Water_Liters_10Feb"].dropna().sum() + filtered["Water_Liters_18Feb"].dropna().sum()) / 1000
+
+# Estimate flood water as 2.5× drip, so saved = flood − drip = 1.5× drip
+jan_saved = jan_drip * 1.5
+feb_saved = feb_drip * 1.5
+
+monthly_df = pd.DataFrame({
+    "Month": ["January 2026", "February 2026"],
+    "Water_Saved_m3": [jan_saved, feb_saved],
+})
+
+if monthly_df["Water_Saved_m3"].sum() > 0:
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=monthly_df["Month"],
+        y=monthly_df["Water_Saved_m3"],
+        text=[f"{v:,.0f} m³" for v in monthly_df["Water_Saved_m3"]],
+        textposition="outside",
+        textfont=dict(color=CHART_COLORS["text"], size=12),
+        marker_color=[CHART_COLORS["primary"], CHART_COLORS["secondary"]],
+        marker_line=dict(width=0),
+        width=0.45,
+    ))
+    fig.update_layout(
+        title=dict(text="Estimated Water Saved Per Month (m³)", font=dict(size=14)),
+        xaxis_title="Month",
+        yaxis_title="Water Saved (m³)",
+        yaxis_rangemode="tozero",
+        height=400,
+        **CHART_TEMPLATE,
+    )
+    st.plotly_chart(fig, width="stretch")
+else:
+    st.info("No meter reading data available to calculate monthly water savings.")
+
+# ─── Water Saving Goal Tracker ─────────────────────────────────────────────────
+st.markdown('<div class="section-title">🎯 Water Saving Goal Tracker</div>', unsafe_allow_html=True)
+
+# Target: save enough water to offset all flood usage → target = estimated_flood_water
+# Actual saved so far = water_saved_m3 (computed in KPI section above)
+saving_target_m3 = estimated_flood_water  # total flood estimate = 2.5 × drip
+actual_saved_m3 = water_saved_m3          # flood − drip = 1.5 × drip
+goal_pct = min((actual_saved_m3 / saving_target_m3) * 100, 100) if saving_target_m3 > 0 else 0
+
+c1, c2 = st.columns([1, 1])
+
+with c1:
+    # Gauge chart
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number+delta",
+        value=goal_pct,
+        number=dict(suffix="%", font=dict(size=42, color=CHART_COLORS["text"])),
+        delta=dict(reference=100, valueformat=".1f", suffix="%",
+                   increasing=dict(color=CHART_COLORS["secondary"]),
+                   decreasing=dict(color=CHART_COLORS["highlight"])),
+        title=dict(text="Goal Achieved", font=dict(size=16, color=CHART_COLORS["text"])),
+        gauge=dict(
+            axis=dict(range=[0, 100], ticksuffix="%",
+                      tickcolor=CHART_COLORS["muted"],
+                      tickfont=dict(color=CHART_COLORS["muted"])),
+            bar=dict(color=CHART_COLORS["secondary"], thickness=0.75),
+            bgcolor=CHART_COLORS["grid"],
+            borderwidth=0,
+            steps=[
+                dict(range=[0, 40], color="rgba(207,34,46,0.12)"),
+                dict(range=[40, 70], color="rgba(191,135,0,0.12)"),
+                dict(range=[70, 100], color="rgba(26,127,55,0.12)"),
+            ],
+            threshold=dict(
+                line=dict(color=CHART_COLORS["highlight"], width=3),
+                thickness=0.8,
+                value=100,
+            ),
+        ),
+    ))
+    fig.update_layout(height=350, **CHART_TEMPLATE)
+    st.plotly_chart(fig, width="stretch")
+
+with c2:
+    # Summary breakdown
+    remaining_m3 = max(saving_target_m3 - actual_saved_m3, 0)
+    st.markdown(f"""
+    <div class="kpi-card" style="padding:24px 20px; text-align:left; margin-top:10px;">
+        <div style="font-size:0.85rem; color:{CHART_COLORS['muted']}; text-transform:uppercase; letter-spacing:1px; margin-bottom:14px;">
+            Savings Breakdown
+        </div>
+        <div style="display:flex; justify-content:space-between; margin-bottom:12px;">
+            <span style="color:{CHART_COLORS['text']};">🎯 Target (Flood Offset)</span>
+            <span style="color:{CHART_COLORS['accent']}; font-weight:700;">{saving_target_m3:,.0f} m³</span>
+        </div>
+        <div style="display:flex; justify-content:space-between; margin-bottom:12px;">
+            <span style="color:{CHART_COLORS['text']};">✅ Saved So Far</span>
+            <span style="color:{CHART_COLORS['secondary']}; font-weight:700;">{actual_saved_m3:,.0f} m³</span>
+        </div>
+        <div style="display:flex; justify-content:space-between; margin-bottom:16px;">
+            <span style="color:{CHART_COLORS['text']};">🔻 Remaining</span>
+            <span style="color:{CHART_COLORS['highlight']}; font-weight:700;">{remaining_m3:,.0f} m³</span>
+        </div>
+        <div style="background:{CHART_COLORS['grid']}; border-radius:8px; height:14px; overflow:hidden;">
+            <div style="background:linear-gradient(90deg, {CHART_COLORS['secondary']}, {CHART_COLORS['primary']});
+                        width:{goal_pct:.1f}%; height:100%; border-radius:8px;"></div>
+        </div>
+        <div style="text-align:center; margin-top:8px; color:{CHART_COLORS['muted']}; font-size:0.78rem;">
+            {goal_pct:.1f}% of target achieved
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 # ─── Helper: build meter time-series ──────────────────────────────────────────
 def build_meter_df(data):
@@ -308,16 +562,14 @@ if not meter_df.empty:
             marker=dict(size=10, color=CHART_COLORS["primary"],
                         line=dict(width=2, color=CHART_COLORS["text"])),
             fill="tozeroy",
-            fillcolor="rgba(88,166,255,0.08)",
+            fillcolor="rgba(9,105,218,0.08)",
         ))
         fig.update_layout(
             title=dict(text="Cumulative Meter Readings (m³)", font=dict(size=14)),
             xaxis_title="Date", yaxis_title="Total (m³)",
-            xaxis=dict(gridcolor=CHART_COLORS["grid"]),
-            yaxis=dict(gridcolor=CHART_COLORS["grid"]),
             height=400, **CHART_TEMPLATE,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     with c2:
         fig = go.Figure()
@@ -332,35 +584,11 @@ if not meter_df.empty:
         fig.update_layout(
             title=dict(text="Incremental Water Per Period (m³)", font=dict(size=14)),
             xaxis_title="Date", yaxis_title="Added (m³)",
-            xaxis=dict(gridcolor=CHART_COLORS["grid"]),
-            yaxis=dict(gridcolor=CHART_COLORS["grid"]),
             height=400, **CHART_TEMPLATE,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
-# ─── 2 · Water Consumption by Farmer ──────────────────────────────────────────
-st.markdown('<div class="section-title">👨‍🌾 Water Consumption by Farmer</div>', unsafe_allow_html=True)
-
-fw = (filtered.groupby("Farmer_Name")["Total_Water_Drip_m3"]
-      .sum().dropna().sort_values(ascending=True).reset_index())
-fw = fw[fw["Total_Water_Drip_m3"] > 0]
-
-if not fw.empty:
-    fig = px.bar(
-        fw, x="Total_Water_Drip_m3", y="Farmer_Name", orientation="h",
-        color="Total_Water_Drip_m3",
-        color_continuous_scale=[[0, "#21262d"], [0.5, "#1f6feb"], [1, "#58a6ff"]],
-        labels={"Total_Water_Drip_m3": "Water (m³)", "Farmer_Name": ""},
-    )
-    fig.update_layout(
-        height=max(380, len(fw) * 28), showlegend=False, coloraxis_showscale=False,
-        xaxis=dict(gridcolor=CHART_COLORS["grid"]),
-        yaxis=dict(gridcolor=CHART_COLORS["grid"]),
-        **CHART_TEMPLATE,
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-# ─── 3 · Crop-wise ────────────────────────────────────────────────────────────
+# ─── 2 · Crop-wise ────────────────────────────────────────────────────────────
 st.markdown('<div class="section-title">🌱 Crop-wise Water Usage &amp; Area</div>', unsafe_allow_html=True)
 
 c1, c2 = st.columns(2)
@@ -379,11 +607,9 @@ with c1:
         fig.update_layout(
             title=dict(text="Drip Water by Crop (m³)", font=dict(size=14)),
             showlegend=False, height=400,
-            xaxis=dict(gridcolor=CHART_COLORS["grid"]),
-            yaxis=dict(gridcolor=CHART_COLORS["grid"]),
             **CHART_TEMPLATE,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 with c2:
     ca = (filtered.groupby("Crop_Name")["Area_Acre"].sum().dropna().reset_index())
@@ -394,12 +620,12 @@ with c2:
             color_discrete_sequence=PALETTE, hole=0.45,
         )
         fig.update_traces(textinfo="percent+label",
-                          textfont=dict(color="white", size=11))
+                          textfont=dict(color="#1f2328", size=11))
         fig.update_layout(
             title=dict(text="Area by Crop (Acres)", font=dict(size=14)),
             height=400, **CHART_TEMPLATE,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 # ─── 4 · Village-wise ─────────────────────────────────────────────────────────
 st.markdown('<div class="section-title">🏘️ Village-wise Comparison</div>', unsafe_allow_html=True)
@@ -420,12 +646,10 @@ with c1:
         fig.update_layout(
             title=dict(text="Farmers & Acres by Village", font=dict(size=14)),
             barmode="group", height=400,
-            xaxis=dict(gridcolor=CHART_COLORS["grid"]),
-            yaxis=dict(gridcolor=CHART_COLORS["grid"]),
             legend=dict(font=dict(color=CHART_COLORS["text"])),
             **CHART_TEMPLATE,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 with c2:
     vw = (filtered.groupby("Village_Name")["Total_Water_Drip_m3"]
@@ -437,12 +661,12 @@ with c2:
             color_discrete_sequence=PALETTE, hole=0.45,
         )
         fig.update_traces(textinfo="percent+label",
-                          textfont=dict(color="white", size=11))
+                          textfont=dict(color="#1f2328", size=11))
         fig.update_layout(
             title=dict(text="Water Share by Village", font=dict(size=14)),
             height=400, **CHART_TEMPLATE,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 # ─── 5 · Water Efficiency Bubble ──────────────────────────────────────────────
 st.markdown('<div class="section-title">⚡ Water Efficiency — Per Acre</div>', unsafe_allow_html=True)
@@ -463,93 +687,10 @@ if not eff.empty:
     fig.update_layout(
         title=dict(text="Water vs Area — bubble = m³ per Acre", font=dict(size=14)),
         height=430,
-        xaxis=dict(gridcolor=CHART_COLORS["grid"]),
-        yaxis=dict(gridcolor=CHART_COLORS["grid"]),
         legend=dict(font=dict(color=CHART_COLORS["text"])),
         **CHART_TEMPLATE,
     )
-    st.plotly_chart(fig, use_container_width=True)
-
-# ─── 6 · Irrigation Frequency & Water Source ──────────────────────────────────
-st.markdown('<div class="section-title">🔄 Irrigation Frequency &amp; Water Source</div>',
-            unsafe_allow_html=True)
-
-c1, c2 = st.columns(2)
-
-with c1:
-    freq = filtered["No_Irrigations_Drip"].dropna()
-    if not freq.empty:
-        fig = px.histogram(
-            freq, nbins=10,
-            color_discrete_sequence=[CHART_COLORS["primary"]],
-            labels={"value": "Irrigation Cycles", "count": "Fields"},
-        )
-        fig.update_layout(
-            title=dict(text="Distribution of Irrigation Cycles", font=dict(size=14)),
-            xaxis_title="Cycles", yaxis_title="Fields",
-            showlegend=False, height=380,
-            xaxis=dict(gridcolor=CHART_COLORS["grid"]),
-            yaxis=dict(gridcolor=CHART_COLORS["grid"]),
-            **CHART_TEMPLATE,
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-with c2:
-    sc = filtered["Water_Source"].dropna().value_counts().reset_index()
-    sc.columns = ["Source", "Count"]
-    if not sc.empty:
-        fig = px.pie(
-            sc, values="Count", names="Source",
-            color_discrete_sequence=[CHART_COLORS["primary"], CHART_COLORS["secondary"],
-                                     CHART_COLORS["accent"]],
-            hole=0.5,
-        )
-        fig.update_traces(textinfo="percent+label",
-                          textfont=dict(color="white", size=11))
-        fig.update_layout(
-            title=dict(text="Water Source Split", font=dict(size=14)),
-            height=380, **CHART_TEMPLATE,
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-# ─── 7 · Heatmap ──────────────────────────────────────────────────────────────
-st.markdown('<div class="section-title">🗓️ Farmer × Date Meter Heatmap</div>', unsafe_allow_html=True)
-
-if not meter_df.empty:
-    pv = meter_df.pivot_table(index="Farmer", columns="Date", values="Meter_m3", aggfunc="sum")
-    for c in DATE_ORDER:
-        if c not in pv.columns:
-            pv[c] = np.nan
-    pv = pv[DATE_ORDER]
-
-    fig = px.imshow(
-        pv,
-        color_continuous_scale=[[0, "#0d1117"], [0.35, "#1f6feb"], [0.7, "#58a6ff"], [1, "#a5d6ff"]],
-        labels={"color": "Meter (m³)"},
-        aspect="auto",
-    )
-    fig.update_layout(
-        title=dict(text="Meter Readings by Farmer & Date", font=dict(size=14)),
-        height=max(380, len(pv) * 26),
-        **CHART_TEMPLATE,
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-# ─── 8 · Data Table ───────────────────────────────────────────────────────────
-st.markdown('<div class="section-title">📋 Detailed Data</div>', unsafe_allow_html=True)
-
-show_cols = [
-    "Farmer_Name", "Village_Name", "Crop_Name", "Area_Acre", "Water_Source",
-    "No_Irrigations_Drip", "Total_Water_Drip_m3", "Avg_Water_Drip_m3",
-    "Meter_30Jan", "Meter_10Feb", "Meter_18Feb", "Total_Water_Consumption",
-]
-disp = filtered[show_cols].dropna(how="all")
-disp.columns = [
-    "Farmer", "Village", "Crop", "Acres", "Source",
-    "# Irrigations", "Drip Water (m³)", "Avg/Irrigation (m³)",
-    "Meter 30 Jan", "Meter 10 Feb", "Meter 18 Feb", "Total Consumption",
-]
-st.dataframe(disp, use_container_width=True, height=400)
+    st.plotly_chart(fig, width="stretch")
 
 # ─── Footer ────────────────────────────────────────────────────────────────────
 st.markdown(f"""

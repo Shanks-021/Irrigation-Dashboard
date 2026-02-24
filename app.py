@@ -44,6 +44,10 @@ st.markdown("""
     .stApp {
         background: #f8f9fb;
     }
+    /* ── Sidebar toggle button (arrow) ── */
+    [data-testid="stSidebarCollapseButton"] [data-testid="stIconMaterial"] {
+        color: #1f2328 !important;
+    }
     section[data-testid="stSidebar"] {
         background: #1e293b;
         border-right: 1px solid #334155;
